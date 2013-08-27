@@ -151,7 +151,9 @@ init(_Args) ->
 idle(_, State=#state{interval_remaining=undefined}) ->
     {next_state, idle, State};
 idle(_, State=#state{interval_remaining=IntervalRemaining}) ->
-    TimerRef = erlang:send_after(IntervalRemaining, self(), start_batch),
+    TimerRef = erlang:send_after(IntervalRemaining,
+                                 self(),
+                                 {start_batch, riak_cs_gc:leeway_seconds()}),
     {next_state, idle, State#state{timer_ref=TimerRef}}.
 
 %% @doc Async transitions from `fetching_next_fileset' are all due to
@@ -237,9 +239,11 @@ paused(_, State) ->
 %% Synchronous events
 
 idle({manual_batch, Options}, _From, State) ->
+    Leeway = leeway_option(Options),
     ok_reply(fetching_next_fileset, start_manual_batch(
-                                       lists:member(testing, Options),
-                                       State));
+                                      lists:member(testing, Options),
+                                      Leeway,
+                                      State));
 idle(pause, _From, State) ->
     ok_reply(paused, pause_gc(idle, State));
 idle({set_interval, Interval}, _From, State)
@@ -322,10 +326,10 @@ handle_sync_event(stop, _From, _StateName, State) ->
 handle_sync_event(_Event, _From, StateName, State) ->
     ok_reply(StateName, State).
 
-handle_info(start_batch, idle, State) ->
-    NewState = start_batch(State),
+handle_info({start_batch, Leeway}, idle, State) ->
+    NewState = start_batch(Leeway, State),
     {next_state, fetching_next_fileset, NewState};
-handle_info(start_batch, InBatch, State) ->
+handle_info({start_batch, _}, InBatch, State) ->
     _ = lager:info("Unable to start garbage collection batch"
                     " because a previous batch is still working."),
     {next_state, InBatch, State};
@@ -380,9 +384,10 @@ elapsed(Time) ->
 
 %% @doc Fetch the list of keys for file manifests that are eligible
 %% for delete.
--spec fetch_eligible_manifest_keys(pid(), non_neg_integer()) -> [binary()].
-fetch_eligible_manifest_keys(RiakPid, IntervalStart) ->
-    EndTime = list_to_binary(integer_to_list(IntervalStart)),
+-spec fetch_eligible_manifest_keys(pid(), non_neg_integer(), non_neg_integer()) ->
+                                          [binary()].
+fetch_eligible_manifest_keys(RiakPid, IntervalStart, Leeway) ->
+    EndTime = list_to_binary(integer_to_list(IntervalStart + Leeway)),
     eligible_manifest_keys(gc_index_query(RiakPid, EndTime)).
 
 eligible_manifest_keys({{ok, ?INDEX_RESULTS{keys=Keys}},
@@ -494,7 +499,9 @@ schedule_next(#state{batch_start=Current,
              riak_cs_gc:timestamp() + Interval),
     _ = lager:debug("Scheduling next garbage collection for ~p",
                     [Next]),
-    TimerRef = erlang:send_after(Interval*1000, self(), start_batch),
+    TimerRef = erlang:send_after(Interval*1000,
+                                 self(),
+                                 {start_batch, riak_cs_gc:leeway_seconds()}),
     State#state{batch_start=undefined,
                 last=Current,
                 next=Next,
@@ -503,7 +510,7 @@ schedule_next(#state{batch_start=Current,
 %% @doc Actually kick off the batch.  After calling this function, you
 %% must advance the FSM state to `fetching_next_fileset'.
 %% Intentionally pattern match on an undefined Riak handle.
-start_batch(State=#state{riak=undefined}) ->
+start_batch(Leeway, State=#state{riak=undefined}) ->
     %% this does not check out a worker from the riak
     %% connection pool; instead it creates a fresh new worker,
     %% the idea being that we don't want to delay deletion
@@ -514,7 +521,9 @@ start_batch(State=#state{riak=undefined}) ->
     %% lookup code
     {ok, Riak} = riak_cs_riakc_pool_worker:start_link([]),
     BatchStart = riak_cs_gc:timestamp(),
-    Batch = fetch_eligible_manifest_keys(Riak, BatchStart),
+    Batch = fetch_eligible_manifest_keys(Riak,
+                                         BatchStart,
+                                         Leeway),
     _ = lager:debug("Batch keys: ~p", [Batch]),
     ok = continue(),
     State#state{batch_start=BatchStart,
@@ -525,11 +534,11 @@ start_batch(State=#state{riak=undefined}) ->
                 block_count=0,
                 riak=Riak}.
 
--spec start_manual_batch(boolean(), #state{}) -> #state{}.
-start_manual_batch(true, State) ->
+-spec start_manual_batch(boolean(), non_neg_integer(), #state{}) -> #state{}.
+start_manual_batch(true, _, State) ->
     State#state{batch=undefined};
-start_manual_batch(false, State) ->
-    start_batch(State).
+start_manual_batch(false, Leeway, State) ->
+    start_batch(Leeway, State).
 
 %% @doc Extract a list of status information from a state record.
 %%
@@ -576,6 +585,15 @@ handle_delete_fsm_reply({error, _}, #state{current_files=[_ | RestManifests]} = 
     ok = continue(),
     State#state{delete_fsm_pid=undefined,
                 current_files=RestManifests}.
+
+-spec leeway_option(list()) -> non_neg_integer().
+leeway_option(Options) ->
+    case lists:keyfind(leeway, 1, Options) of
+        {leeway, Leeway} ->
+            Leeway;
+        false ->
+            riak_cs_gc:leeway_seconds()
+    end.
 
 %% ===================================================================
 %% Test API

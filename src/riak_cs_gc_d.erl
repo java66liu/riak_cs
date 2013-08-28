@@ -251,6 +251,7 @@ idle({set_interval, Interval}, _From, State)
     ok_reply(idle, State#state{interval=Interval});
 idle(Msg, _From, State) ->
     Common = [{status, {ok, {idle, [{interval, State#state.interval},
+                                    {leeway, riak_cs_gc:leeway_seconds()},
                                     {last, State#state.last},
                                     {next, State#state.next}]}}},
               {cancel_batch, {error, no_batch}},
@@ -546,6 +547,7 @@ start_manual_batch(false, Leeway, State) ->
 -spec status_data(#state{}) -> [{atom(), term()}].
 status_data(State) ->
     [{interval, State#state.interval},
+     {leeway, riak_cs_gc:leeway_seconds()},
      {last, State#state.last},
      {current, State#state.batch_start},
      {next, State#state.next},

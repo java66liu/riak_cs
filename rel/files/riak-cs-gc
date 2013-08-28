@@ -18,7 +18,8 @@ case "$1" in
         $NODETOOL rpc riak_cs_gc_console $@
         ;;
     *)
-        echo "Usage: $SCRIPT { batch|status|pause|resume|cancel|set-interval }"
+        echo "Usage: $SCRIPT { batch [<leeway_seconds>]|status|pause|resume|cancel|" \
+            "set-interval <interval_seconds>|set-leeway <leeway_seconds> }"
         exit 1
         ;;
 esac
